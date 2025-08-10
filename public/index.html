@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PreSeeds App</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="logo.png" alt="PreSeeds" class="logo" onerror="this.style.display='none'"/>
+      <h1>PreSeeds App</h1>
+    </div>
+    <div class="status" id="status">Comprobando estado...</div>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Estado del servidor</h2>
+      <pre id="healthOutput">...</pre>
+      <button id="checkHealth">Volver a comprobar</button>
+    </section>
+
+    <section class="card">
+      <h2>Perfil productivo (demo)</h2>
+      <form id="profileForm">
+        <label>ID de Lote
+          <input type="text" name="lotId" placeholder="Ej: Lote_123" required />
+        </label>
+        <label>Fecha inicio
+          <input type="date" name="startDate" />
+        </label>
+        <label>Fecha fin
+          <input type="date" name="endDate" />
+        </label>
+        <button type="submit">Consultar</button>
+      </form>
+      <pre id="profileOutput">...</pre>
+    </section>
+
+    <section class="card">
+      <h2>Procesar Shapefile (.zip)</h2>
+      <form id="shpForm">
+        <input type="file" name="file" accept=".zip" required />
+        <button type="submit">Subir y procesar</button>
+      </form>
+      <pre id="shpOutput">...</pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <small>© PreSeeds — <a href="https://preseeds.com.ar" target="_blank" rel="noreferrer">preseeds.com.ar</a></small>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
