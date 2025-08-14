@@ -35,13 +35,13 @@ app.get('/health', (_req, res) =>
   res.json({ ok: true, name: 'PreSeeds App', version: '1.0.0' })
 );
 
-// Procesar Shapefile .zip → contar features usando shpjs (con fallback)
+// Procesar Shapefile .zip → contar features usando shpjs (con fallback robusto)
 app.post('/api/process-shp', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const filePath = req.file.path;
 
-  // util: contar features de distintos formatos
+  // util para contar features de distintos formatos/resultados
   const countFeatures = (g) => {
     if (!g) return 0;
     if (Array.isArray(g)) return g.reduce((s, x) => s + countFeatures(x), 0);
@@ -56,37 +56,58 @@ app.post('/api/process-shp', upload.single('file'), async (req, res) => {
 
     let geojson;
     try {
-      // intento directo: zip plano
+      // Intento directo: ZIP plano
       geojson = await shp(arrayBuffer);
-    } catch (directErr) {
-      // Fallback: rearmar un zip “limpio” con la capa principal aunque esté en subcarpetas
+    } catch (_directErr) {
+      // Fallback: rearmar un ZIP “limpio” aunque los archivos estén en subcarpetas
+      // y con diferencias de mayúsculas/minúsculas.
       const originalZip = await JSZip.loadAsync(arrayBuffer);
-      const files = Object.keys(originalZip.files);
+      const files = Object.keys(originalZip.files);        // nombres tal cual
+      const filesLC = files.map((f) => f.toLowerCase());   // para buscar sin case-sensitive
 
-      const shpEntry = files.find((n) => n.toLowerCase().endsWith('.shp'));
-      if (!shpEntry) throw new Error(`No .shp found in ZIP. Files: ${files.join(', ')}`);
-      const base = shpEntry.replace(/\\/g, '/').split('/').pop().replace(/\.[^/.]+$/, '');
+      // localizar el .shp (cualquiera)
+      const shpIdx = filesLC.findIndex((n) => n.endsWith('.shp'));
+      if (shpIdx === -1) {
+        throw new Error(`No .shp found in ZIP. Files: ${files.join(', ')}`);
+      }
 
-      const findFile = (ext) => files.find((n) => n.toLowerCase().endsWith(`/${base}.${ext}`) || n.toLowerCase().endsWith(`${base}.${ext}`));
+      const shpEntry = files[shpIdx];
+      // base en minúsculas (nombre sin path ni extensión)
+      const baseLower = filesLC[shpIdx]
+        .replace(/\\/g, '/')
+        .split('/')
+        .pop()
+        .replace(/\.[^/.]+$/, '');
+
+      const findFile = (ext) => {
+        const idx = filesLC.findIndex(
+          (n) => n.endsWith(`/${baseLower}.${ext}`) || n.endsWith(`${baseLower}.${ext}`)
+        );
+        return idx >= 0 ? files[idx] : null;
+      };
+
       const dbfEntry = findFile('dbf');
-      if (!dbfEntry) throw new Error(`.dbf missing for ${base}. Files: ${files.join(', ')}`);
-
+      if (!dbfEntry) {
+        throw new Error(`.dbf missing for ${baseLower}. Files: ${files.join(', ')}`);
+      }
       const shxEntry = findFile('shx');
       const prjEntry = findFile('prj');
 
+      // construir un zip mínimo con los pares requeridos
       const mini = new JSZip();
-      // cargar contenidos como arraybuffer/string
       const shpBuf = await originalZip.file(shpEntry).async('arraybuffer');
+      mini.file(`${baseLower}.shp`, shpBuf);
+
       const dbfBuf = await originalZip.file(dbfEntry).async('arraybuffer');
-      mini.file(`${base}.shp`, shpBuf);
-      mini.file(`${base}.dbf`, dbfBuf);
+      mini.file(`${baseLower}.dbf`, dbfBuf);
+
       if (shxEntry) {
         const shxBuf = await originalZip.file(shxEntry).async('arraybuffer');
-        mini.file(`${base}.shx`, shxBuf);
+        mini.file(`${baseLower}.shx`, shxBuf);
       }
       if (prjEntry) {
         const prjTxt = await originalZip.file(prjEntry).async('string');
-        mini.file(`${base}.prj`, prjTxt);
+        mini.file(`${baseLower}.prj`, prjTxt);
       }
 
       const rebundled = await mini.generateAsync({ type: 'arraybuffer' });
