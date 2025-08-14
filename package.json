@@ -1,14 +1,14 @@
 {
   "name": "preseeds-app",
   "version": "1.0.0",
-  "description": "PreSeeds App - Node/Express backend with static frontend",
+  "description": "PreSeeds App — Node/Express backend with static frontend",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {
     "axios": "^1.7.2",
@@ -16,6 +16,8 @@
     "express": "^4.19.2",
     "jszip": "^3.10.1",
     "multer": "^1.4.5-lts.1",
-    "shpjs": "^6.0.0"
+    "shpjs": "^3.6.4",
+    "@tmcw/togeojson": "^5.7.0",
+    "@xmldom/xmldom": "^0.8.10"
   }
 }
