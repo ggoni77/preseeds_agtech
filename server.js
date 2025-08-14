@@ -27,6 +27,7 @@ app.get('/health', (_req, res) => res.json({ ok: true, name: 'PreSeeds App', ver
 
 // Example: process a shapefile .zip and return GeoJSON quick stats
 app.post('/api/process-shp', upload.single('file'), async (req, res) => {
+
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const geojson = await shp(req.file.path);
@@ -69,3 +70,6 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`PreSeeds app listening on http://localhost:${PORT}`);
 });
+// Asegurar la carpeta de subidas al iniciar (necesario en Render)
+fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+
