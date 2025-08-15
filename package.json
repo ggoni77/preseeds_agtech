@@ -21,3 +21,16 @@
     "@xmldom/xmldom": "^0.8.10"
   }
 }
+"dependencies": {
+  "axios": "^1.7.2",
+  "cors": "^2.8.5",
+  "express": "^4.19.2",
+  "jszip": "^3.10.1",
+  "multer": "^1.4.5-lts.1",
+  "shpjs": "^3.6.3",
+  "@tmcw/togeojson": "^5.7.0",
+  "@xmldom/xmldom": "^0.8.10"
+},
+"engines": { "node": "20.x" },
+"scripts": { "start": "node server.js" }
+

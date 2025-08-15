@@ -1,20 +1,19 @@
 // server.js
 const express = require('express');
 const multer = require('multer');
-const axios = require('axios');
 const JSZip = require('jszip');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
 
-// --- Polyfill para shpjs en Node (Render puede usar Node 24) ---
+// --- Polyfill necesario para shpjs en Node (Render puede usar Node 20/24)
 if (typeof globalThis.self === 'undefined') {
   globalThis.self = globalThis;
 }
 
-// En Node 20/24, require('shpjs') puede devolver { default: fn }
-const shpModule = require('shpjs');
-const shp = typeof shpModule === 'function' ? shpModule : shpModule.default;
+// En algunos runtimes, require('shpjs') devuelve { default: fn } en vez de la fn directa
+const shpModule = require('shpjs');            // debe ser 3.6.3 en package.json
+const shp = typeof shpModule === 'function' ? shpModule : (shpModule.default || shpModule);
 
 // Asegurar carpeta de subidas ANTES de usar multer
 fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
@@ -27,13 +26,17 @@ app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Static files (frontend)
+// Servir frontend estático desde /public
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Multer para uploads
+// Multer para manejar archivos subidos
 const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
-// ---------- Helpers comunes ----------
+/* ===================== Helpers ===================== */
+
+const bufferToArrayBuffer = (buf) =>
+  buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+
 const countFeatures = (g) => {
   if (!g) return 0;
   if (Array.isArray(g)) return g.reduce((s, x) => s + countFeatures(x), 0);
@@ -42,26 +45,26 @@ const countFeatures = (g) => {
   return 0;
 };
 
-const bufferToArrayBuffer = (buf) =>
-  buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-
-// ---------- Parsers por formato ----------
+/* ---------- SHP (.zip) ---------- */
 async function parseShapefileZip(buf) {
-  // 1) intento directo
+  // 1) Intento directo (zip plano)
   try {
     return await shp(bufferToArrayBuffer(buf));
   } catch (_) {
-    // 2) fallback: rearmar zip “limpio” aun con subcarpetas / case raro
+    // 2) Fallback: rearmar zip “limpio” (tolera subcarpetas y mayúsculas/minúsculas)
     const originalZip = await JSZip.loadAsync(bufferToArrayBuffer(buf));
-    const files = Object.keys(originalZip.files);        // nombres originales
-    const filesLC = files.map((f) => f.toLowerCase());   // lista en minúsculas
+    const files = Object.keys(originalZip.files);       // nombres originales
+    const filesLC = files.map((f) => f.toLowerCase());  // para buscar sin case-sensitive
 
     const shpIdx = filesLC.findIndex((n) => n.endsWith('.shp'));
     if (shpIdx === -1) throw new Error(`No .shp found in ZIP. Files: ${files.join(', ')}`);
 
     const shpEntry = files[shpIdx];
-    // nombre base en minúsculas
-    const baseLower = filesLC[shpIdx].replace(/\\/g, '/').split('/').pop().replace(/\.[^/.]+$/, '');
+    const baseLower = filesLC[shpIdx]
+      .replace(/\\/g, '/')
+      .split('/')
+      .pop()
+      .replace(/\.[^/.]+$/, '');
 
     const findFile = (ext) => {
       const idx = filesLC.findIndex(
@@ -96,19 +99,21 @@ async function parseShapefileZip(buf) {
   }
 }
 
+/* ---------- KML ---------- */
 async function parseKML(buffer) {
-  // Carga ESM a demanda para evitar líos de CJS/ESM
   const { DOMParser } = require('@xmldom/xmldom');
   const xml = new DOMParser().parseFromString(buffer.toString(), 'text/xml');
-  const togeo = await import('@tmcw/togeojson'); // { kml, gpx }
+  const togeo = await import('@tmcw/togeojson'); // ESM dinámico
   return togeo.kml(xml);
 }
 
+/* ---------- KMZ ---------- */
 async function parseKMZ(buffer) {
   const zip = await JSZip.loadAsync(bufferToArrayBuffer(buffer));
   const names = Object.keys(zip.files);
   const kmlName = names.find((n) => n.toLowerCase().endsWith('.kml'));
   if (!kmlName) throw new Error(`No .kml found inside KMZ. Files: ${names.join(', ')}`);
+
   const kmlText = await zip.file(kmlName).async('string');
   const { DOMParser } = require('@xmldom/xmldom');
   const xml = new DOMParser().parseFromString(kmlText, 'text/xml');
@@ -116,18 +121,21 @@ async function parseKMZ(buffer) {
   return togeo.kml(xml);
 }
 
-// ---------- Endpoints ----------
+/* ===================== Rutas ===================== */
+
+// Healthcheck
 app.get('/health', (_req, res) =>
   res.json({ ok: true, name: 'PreSeeds App', version: '1.0.0' })
 );
 
 /**
- * /api/process-shp
+ * POST /api/process-shp
  * Acepta: .zip (SHP), .kml, .kmz
- * Form field: file
+ * Campo: file
  */
 app.post('/api/process-shp', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
   const filePath = req.file.path;
   const originalName = (req.file.originalname || '').toLowerCase();
 
@@ -142,7 +150,9 @@ app.post('/api/process-shp', upload.single('file'), async (req, res) => {
     } else if (originalName.endsWith('.kmz')) {
       geojson = await parseKMZ(buf);
     } else {
-      return res.status(400).json({ error: 'Unsupported file type. Use .zip (SHP), .kml or .kmz' });
+      return res.status(400).json({
+        error: 'Unsupported file type. Use .zip (SHP), .kml or .kmz'
+      });
     }
 
     const features = countFeatures(geojson);
@@ -154,15 +164,17 @@ app.post('/api/process-shp', upload.single('file'), async (req, res) => {
       message: String(err?.message || err),
     });
   } finally {
-    fs.unlink(filePath, () => {}); // limpiar archivo temporal
+    fs.unlink(filePath, () => {}); // limpiar temporal
   }
 });
 
-// Demo: perfil productivo
+// Demo: endpoint de perfil productivo
 app.post('/api/profile', async (req, res) => {
   try {
     const { lotId, startDate, endDate } = req.body || {};
     if (!lotId) return res.status(400).json({ error: 'lotId is required' });
+
+    // TODO: reemplazar con fuentes reales (GEE, clima, suelo, etc.)
     const profile = {
       lotId,
       period: { startDate, endDate },
@@ -176,11 +188,12 @@ app.post('/api/profile', async (req, res) => {
   }
 });
 
-// Fallback: servir index.html
+// Fallback: servir index.html del frontend
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Arranque
 app.listen(PORT, () => {
   console.log(`PreSeeds app listening on http://localhost:${PORT}`);
 });
