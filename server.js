@@ -5,18 +5,20 @@ const JSZip = require('jszip');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const turf = require('@turf/turf');
 
-// --- Polyfill necesario para shpjs en Node (Render puede usar Node 20/24)
+// --- Polyfill para shpjs (necesita globalThis.self en Node) ---
 if (typeof globalThis.self === 'undefined') {
   globalThis.self = globalThis;
 }
 
-// En algunos runtimes, require('shpjs') devuelve { default: fn } en vez de la fn directa
-const shpModule = require('shpjs');            // debe ser 3.6.3 en package.json
-const shp = typeof shpModule === 'function' ? shpModule : (shpModule.default || shpModule);
+// Carga robusta de shpjs (aseguramos función)
+const shpMod = require('shpjs'); // usa 3.6.3 en package.json
+const shp = typeof shpMod === 'function' ? shpMod : (shpMod.default || shpMod);
 
 // Asegurar carpeta de subidas ANTES de usar multer
-fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,51 +28,53 @@ app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Servir frontend estático desde /public
+// Frontend estático
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Multer para manejar archivos subidos
-const upload = multer({ dest: path.join(__dirname, 'uploads') });
+// Multer
+const upload = multer({ dest: UPLOAD_DIR });
 
 /* ===================== Helpers ===================== */
-
 const bufferToArrayBuffer = (buf) =>
   buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 
-const countFeatures = (g) => {
-  if (!g) return 0;
-  if (Array.isArray(g)) return g.reduce((s, x) => s + countFeatures(x), 0);
-  if (g.type === 'FeatureCollection' && Array.isArray(g.features)) return g.features.length;
-  if (typeof g === 'object') return Object.values(g).reduce((s, x) => s + countFeatures(x), 0);
-  return 0;
+// Normaliza a FeatureCollection
+const toFC = (g) => {
+  if (!g) return { type: 'FeatureCollection', features: [] };
+  if (g.type === 'FeatureCollection') return g;
+  if (Array.isArray(g)) {
+    const feats = [];
+    g.forEach((x) => { feats.push(...toFC(x).features); });
+    return { type: 'FeatureCollection', features: feats };
+  }
+  if (g.type && g.geometry) return { type: 'FeatureCollection', features: [g] };
+  const feats = [];
+  Object.values(g).forEach((x) => { feats.push(...toFC(x).features); });
+  return { type: 'FeatureCollection', features: feats };
 };
 
 /* ---------- SHP (.zip) ---------- */
 async function parseShapefileZip(buf) {
-  // 1) Intento directo (zip plano)
   try {
+    // ZIP plano
     return await shp(bufferToArrayBuffer(buf));
   } catch (_) {
-    // 2) Fallback: rearmar zip “limpio” (tolera subcarpetas y mayúsculas/minúsculas)
+    // Fallback: rearmar ZIP “limpio” tolerando subcarpetas y mayúsc/minúsculas
     const originalZip = await JSZip.loadAsync(bufferToArrayBuffer(buf));
-    const files = Object.keys(originalZip.files);       // nombres originales
-    const filesLC = files.map((f) => f.toLowerCase());  // para buscar sin case-sensitive
+    const files = Object.keys(originalZip.files);
+    const filesLC = files.map((f) => f.toLowerCase());
 
     const shpIdx = filesLC.findIndex((n) => n.endsWith('.shp'));
     if (shpIdx === -1) throw new Error(`No .shp found in ZIP. Files: ${files.join(', ')}`);
 
     const shpEntry = files[shpIdx];
-    const baseLower = filesLC[shpIdx]
-      .replace(/\\/g, '/')
-      .split('/')
-      .pop()
-      .replace(/\.[^/.]+$/, '');
+    const baseLower = filesLC[shpIdx].replace(/\\/g, '/').split('/').pop().replace(/\.[^/.]+$/, '');
 
     const findFile = (ext) => {
-      const idx = filesLC.findIndex(
+      const i = filesLC.findIndex(
         (n) => n.endsWith(`/${baseLower}.${ext}`) || n.endsWith(`${baseLower}.${ext}`)
       );
-      return idx >= 0 ? files[idx] : null;
+      return i >= 0 ? files[i] : null;
     };
 
     const dbfEntry = findFile('dbf');
@@ -79,20 +83,10 @@ async function parseShapefileZip(buf) {
     const prjEntry = findFile('prj');
 
     const mini = new JSZip();
-    const shpBuf = await originalZip.file(shpEntry).async('arraybuffer');
-    mini.file(`${baseLower}.shp`, shpBuf);
-
-    const dbfBuf = await originalZip.file(dbfEntry).async('arraybuffer');
-    mini.file(`${baseLower}.dbf`, dbfBuf);
-
-    if (shxEntry) {
-      const shxBuf = await originalZip.file(shxEntry).async('arraybuffer');
-      mini.file(`${baseLower}.shx`, shxBuf);
-    }
-    if (prjEntry) {
-      const prjTxt = await originalZip.file(prjEntry).async('string');
-      mini.file(`${baseLower}.prj`, prjTxt);
-    }
+    mini.file(`${baseLower}.shp`, await originalZip.file(shpEntry).async('arraybuffer'));
+    mini.file(`${baseLower}.dbf`, await originalZip.file(dbfEntry).async('arraybuffer'));
+    if (shxEntry) mini.file(`${baseLower}.shx`, await originalZip.file(shxEntry).async('arraybuffer'));
+    if (prjEntry) mini.file(`${baseLower}.prj`, await originalZip.file(prjEntry).async('string'));
 
     const rebundled = await mini.generateAsync({ type: 'arraybuffer' });
     return await shp(rebundled);
@@ -103,7 +97,7 @@ async function parseShapefileZip(buf) {
 async function parseKML(buffer) {
   const { DOMParser } = require('@xmldom/xmldom');
   const xml = new DOMParser().parseFromString(buffer.toString(), 'text/xml');
-  const togeo = await import('@tmcw/togeojson'); // ESM dinámico
+  const togeo = await import('@tmcw/togeojson');
   return togeo.kml(xml);
 }
 
@@ -113,7 +107,6 @@ async function parseKMZ(buffer) {
   const names = Object.keys(zip.files);
   const kmlName = names.find((n) => n.toLowerCase().endsWith('.kml'));
   if (!kmlName) throw new Error(`No .kml found inside KMZ. Files: ${names.join(', ')}`);
-
   const kmlText = await zip.file(kmlName).async('string');
   const { DOMParser } = require('@xmldom/xmldom');
   const xml = new DOMParser().parseFromString(kmlText, 'text/xml');
@@ -123,15 +116,15 @@ async function parseKMZ(buffer) {
 
 /* ===================== Rutas ===================== */
 
-// Healthcheck
+// Health
 app.get('/health', (_req, res) =>
   res.json({ ok: true, name: 'PreSeeds App', version: '1.0.0' })
 );
 
 /**
  * POST /api/process-shp
- * Acepta: .zip (SHP), .kml, .kmz
- * Campo: file
+ * Campo: file  |  Tipos: .zip (SHP), .kml, .kmz
+ * Respuesta: { features, geomTypes, areaHa, bbox, crs }
  */
 app.post('/api/process-shp', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -143,20 +136,37 @@ app.post('/api/process-shp', upload.single('file'), async (req, res) => {
     const buf = await fs.promises.readFile(filePath);
     let geojson;
 
-    if (originalName.endsWith('.zip')) {
-      geojson = await parseShapefileZip(buf);
-    } else if (originalName.endsWith('.kml')) {
-      geojson = await parseKML(buf);
-    } else if (originalName.endsWith('.kmz')) {
-      geojson = await parseKMZ(buf);
-    } else {
-      return res.status(400).json({
-        error: 'Unsupported file type. Use .zip (SHP), .kml or .kmz'
-      });
+    if (originalName.endsWith('.zip')) geojson = await parseShapefileZip(buf);
+    else if (originalName.endsWith('.kml')) geojson = await parseKML(buf);
+    else if (originalName.endsWith('.kmz')) geojson = await parseKMZ(buf);
+    else return res.status(400).json({ error: 'Unsupported file type. Use .zip (SHP), .kml or .kmz' });
+
+    const fc = toFC(geojson);
+
+    // Conteo por tipo de geometría
+    const geomTypes = {};
+    for (const f of fc.features) {
+      const t = f?.geometry?.type || 'Unknown';
+      geomTypes[t] = (geomTypes[t] || 0) + 1;
     }
 
-    const features = countFeatures(geojson);
-    return res.json({ features });
+    // Área total en hectáreas (suma polígonos; ignora features inválidos)
+    let areaHa = 0;
+    for (const f of fc.features) {
+      try { areaHa += turf.area(f) / 10000; } catch {}
+    }
+
+    // BBox [minX, minY, maxX, maxY]
+    let bbox = null;
+    try { bbox = turf.bbox(fc); } catch {}
+
+    return res.json({
+      features: fc.features.length,
+      geomTypes,
+      areaHa: Number(areaHa.toFixed(2)),
+      bbox,
+      crs: geojson.crs || null
+    });
   } catch (err) {
     console.error('Geom error:', err);
     return res.status(500).json({
@@ -168,13 +178,13 @@ app.post('/api/process-shp', upload.single('file'), async (req, res) => {
   }
 });
 
-// Demo: endpoint de perfil productivo
+// Demo: perfil productivo
 app.post('/api/profile', async (req, res) => {
   try {
     const { lotId, startDate, endDate } = req.body || {};
     if (!lotId) return res.status(400).json({ error: 'lotId is required' });
 
-    // TODO: reemplazar con fuentes reales (GEE, clima, suelo, etc.)
+    // TODO: reemplazar por fuentes reales (GEE, clima, suelo, etc.)
     const profile = {
       lotId,
       period: { startDate, endDate },
@@ -188,7 +198,7 @@ app.post('/api/profile', async (req, res) => {
   }
 });
 
-// Fallback: servir index.html del frontend
+// Fallback frontend
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
